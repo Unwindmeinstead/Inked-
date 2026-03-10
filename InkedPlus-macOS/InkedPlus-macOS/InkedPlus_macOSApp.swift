@@ -14,7 +14,7 @@ struct InkedPlusApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
-                .frame(minWidth: 900, minHeight: 600)
+                .frame(minWidth: 700, minHeight: 600)
         }
         .windowStyle(.hiddenTitleBar)
         .commands {

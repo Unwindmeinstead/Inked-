@@ -1,9 +1,6 @@
-//
-//  ContentView.swift
-//  InkedPlus-macOS
-//
-//  Created by Unknown on 3/10/26.
-//
+// Inked+ for macOS — Complete SwiftUI rewrite matching the HTML/Electron UI
+// Single-file, no dependencies. Requires macOS 13+.
+// Add to Info.plist: NSSpeechRecognitionUsageDescription, NSMicrophoneUsageDescription
 
 import SwiftUI
 import AppKit
@@ -14,14 +11,14 @@ import AVFoundation
 
 extension Color {
     static let inkBlack      = Color(hex: "#000000")
-    static let inkZinc900    = Color(hex: "#27272a")
-    static let inkZinc800    = Color(hex: "#3f3f46")
-    static let inkZinc700    = Color(hex: "#52525b")
-    static let inkZinc600    = Color(hex: "#71717a")
-    static let inkZinc500    = Color(hex: "#a1a1aa")
-    static let inkZinc400    = Color(hex: "#d4d4d8")
-    static let inkZinc300    = Color(hex: "#e4e4e7")
-    static let inkZinc200    = Color(hex: "#f4f4f5")
+    static let inkZinc900    = Color(hex: "#18181b")
+    static let inkZinc800    = Color(hex: "#27272a")
+    static let inkZinc700    = Color(hex: "#3f3f46")
+    static let inkZinc600    = Color(hex: "#52525b")
+    static let inkZinc500    = Color(hex: "#71717a")
+    static let inkZinc400    = Color(hex: "#a1a1aa")
+    static let inkZinc300    = Color(hex: "#d4d4d8")
+    static let inkZinc200    = Color(hex: "#e4e4e7")
     static let inkZinc100    = Color(hex: "#f4f4f5")
     static let inkRed900     = Color(hex: "#7f1d1d")
     static let inkRed800     = Color(hex: "#991b1b")
@@ -68,6 +65,7 @@ final class AppStore: ObservableObject {
 
     private let nbKey = "ink-notebooks-v2"
     private let ntKey = "ink-notes-v2"
+    private let persistenceQueue = DispatchQueue(label: "inked.store.persistence", qos: .utility)
 
     init() {
         load()
@@ -96,8 +94,19 @@ final class AppStore: ObservableObject {
     }
 
     func save() {
-        if let d = try? JSONEncoder().encode(notebooks) { UserDefaults.standard.set(d, forKey: nbKey) }
-        if let d = try? JSONEncoder().encode(notes)     { UserDefaults.standard.set(d, forKey: ntKey) }
+        let notebooksSnapshot = notebooks
+        let notesSnapshot = notes
+        let nbKey = self.nbKey
+        let ntKey = self.ntKey
+
+        persistenceQueue.async {
+            if let d = try? JSONEncoder().encode(notebooksSnapshot) {
+                UserDefaults.standard.set(d, forKey: nbKey)
+            }
+            if let d = try? JSONEncoder().encode(notesSnapshot) {
+                UserDefaults.standard.set(d, forKey: ntKey)
+            }
+        }
     }
 
     private func load() {
@@ -182,9 +191,20 @@ final class VoiceRecognizer: ObservableObject {
     }
 
     private func start() {
-        SFSpeechRecognizer.requestAuthorization { [weak self] status in
-            guard status == .authorized else { return }
-            DispatchQueue.main.async { self?.beginSession() }
+        let status = SFSpeechRecognizer.authorizationStatus()
+        switch status {
+        case .authorized:
+            beginSession()
+        case .notDetermined:
+            SFSpeechRecognizer.requestAuthorization { [weak self] newStatus in
+                guard newStatus == .authorized else { return }
+                DispatchQueue.main.async {
+                    self?.beginSession()
+                }
+            }
+        default:
+            // denied / restricted – user must change this in System Settings
+            break
         }
     }
 
@@ -207,17 +227,23 @@ final class VoiceRecognizer: ObservableObject {
 
         task = recognizer?.recognitionTask(with: req) { [weak self] result, error in
             guard let self else { return }
+
             if let r = result {
                 let txt = r.bestTranscription.formattedString
                 if r.isFinal {
+                    // Final transcript once per session
                     self.interimText = ""
                     self.onFinalResult?(txt)
+                    self.stop()
                 } else {
+                    // Lightweight interim text for UI-only use
                     self.interimText = txt
                 }
             }
-            if error != nil || (result?.isFinal == true) {
-                if self.isRecording { self.stop(); self.beginSession() }
+
+            // On error, stop cleanly instead of looping
+            if error != nil {
+                self.stop()
             }
         }
         isRecording = true
@@ -243,6 +269,8 @@ struct RichTextEditor: NSViewRepresentable {
     var onWordCount: (Int, Int) -> Void
     var formatCommand: FormatCommand?
     var insertText: String?
+    var fontName: String = "Poppins"
+    var formatVersion: Int = 0
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -278,9 +306,9 @@ struct RichTextEditor: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let tv = scroll.documentView as? NSTextView else { return }
-        // Handle format commands
-        if let cmd = formatCommand, cmd != context.coordinator.lastCommand {
-            context.coordinator.lastCommand = cmd
+        // Handle format commands (use version to allow repeated toggles)
+        if let cmd = formatCommand, formatVersion != context.coordinator.lastVersion {
+            context.coordinator.lastVersion = formatVersion
             applyFormat(cmd, to: tv)
         }
         // Handle text insertion (voice)
@@ -293,8 +321,9 @@ struct RichTextEditor: NSViewRepresentable {
     private func defaultTypingAttributes() -> [NSAttributedString.Key: Any] {
         let para = NSMutableParagraphStyle()
         para.lineSpacing = 6
+        let baseFont = NSFont(name: fontName, size: 15) ?? NSFont.systemFont(ofSize: 15, weight: .light)
         return [
-            .font: NSFont.systemFont(ofSize: 15, weight: .light),
+            .font: baseFont,
             .foregroundColor: NSColor(Color.inkZinc300),
             .paragraphStyle: para,
         ]
@@ -316,9 +345,9 @@ struct RichTextEditor: NSViewRepresentable {
 
         switch cmd {
         case .bold:
-            toggleTrait(.boldTrait, in: storage, range: range, tv: tv)
+            toggleTrait(.boldFontMask, in: storage, range: range, tv: tv)
         case .italic:
-            toggleTrait(.italicTrait, in: storage, range: range, tv: tv)
+            toggleTrait(.italicFontMask, in: storage, range: range, tv: tv)
         case .underline:
             toggleAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, in: storage, range: range)
         case .strikethrough:
@@ -440,6 +469,8 @@ struct RichTextEditor: NSViewRepresentable {
         weak var textView: NSTextView?
         var lastCommand: FormatCommand?
         var lastInsert: String?
+        var lastVersion: Int = 0
+        private var isHandlingListContinuation = false
 
         init(_ parent: RichTextEditor) { self.parent = parent }
 
@@ -448,8 +479,97 @@ struct RichTextEditor: NSViewRepresentable {
             parent.plainText = tv.string
             let words = tv.string.split(whereSeparator: \.isWhitespace).count
             parent.onWordCount(words, tv.string.count)
-            if let data = tv.textStorage?.rtf(from: NSRange(location: 0, length: tv.textStorage?.length ?? 0)) {
-                parent.rtfData = data
+
+            // Auto-style first line as H1, rest as paragraph
+            if let storage = tv.textStorage {
+                let nsString = storage.string as NSString
+                let firstLineRange = nsString.lineRange(for: NSRange(location: 0, length: 0))
+
+                // H1 style
+                let h1Font = NSFont.systemFont(ofSize: 26, weight: .semibold)
+                let h1Attrs: [NSAttributedString.Key: Any] = [
+                    .font: h1Font,
+                    .foregroundColor: NSColor(Color.inkZinc100),
+                ]
+
+                storage.beginEditing()
+                // Promote first line to H1 without touching the rest
+                if firstLineRange.length > 0 {
+                    storage.addAttributes(h1Attrs, range: firstLineRange)
+                }
+                storage.endEditing()
+            }
+
+            // Automatic list continuation for bullets and numbered lists
+            guard !isHandlingListContinuation else { return }
+            guard tv.selectedRange.length == 0 else { return }
+
+            let cursorLocation = tv.selectedRange.location
+            guard cursorLocation > 0 else { return }
+
+            let nsString = tv.string as NSString
+            let previousCharRange = NSRange(location: cursorLocation - 1, length: 1)
+            let previousChar = nsString.substring(with: previousCharRange)
+
+            // Only react immediately after a newline
+            guard previousChar == "\n" else { return }
+
+            isHandlingListContinuation = true
+            defer { isHandlingListContinuation = false }
+
+            // Look at the previous line to decide what to do
+            let prevLineRange = nsString.lineRange(for: NSRange(location: max(cursorLocation - 2, 0), length: 0))
+            let prevLine = nsString.substring(with: prevLineRange)
+            let trimmed = prevLine.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Bullet continuation: "• "
+            if trimmed.hasPrefix("•") {
+                // If the line is just "•" or "• " (no content), pressing Enter should end the list
+                let content = trimmed.dropFirst(1).trimmingCharacters(in: .whitespaces)
+                if content.isEmpty {
+                    // Remove the previous bullet marker
+                    if let storage = tv.textStorage {
+                        storage.beginEditing()
+                        storage.replaceCharacters(in: prevLineRange, with: "")
+                        storage.endEditing()
+                        tv.setSelectedRange(NSRange(location: max(prevLineRange.location, 0), length: 0))
+                    }
+                } else {
+                    tv.insertText("• ", replacementRange: tv.selectedRange())
+                }
+                return
+            }
+
+            // Numbered list continuation: "1. ", "2. ", ...
+            var numberPrefix = ""
+            for ch in trimmed {
+                if ch.isNumber {
+                    numberPrefix.append(ch)
+                } else {
+                    break
+                }
+            }
+
+            if !numberPrefix.isEmpty {
+                let remainder = trimmed.dropFirst(numberPrefix.count).trimmingCharacters(in: .whitespaces)
+                if remainder.hasPrefix(".") {
+                    let afterDot = remainder.dropFirst().trimmingCharacters(in: .whitespaces)
+                    if afterDot.isEmpty {
+                        // Line like "1." or "1. " with no content: end the list when pressing Enter
+                        if let storage = tv.textStorage {
+                            storage.beginEditing()
+                            storage.replaceCharacters(in: prevLineRange, with: "")
+                            storage.endEditing()
+                            tv.setSelectedRange(NSRange(location: max(prevLineRange.location, 0), length: 0))
+                        }
+                    } else {
+                        // Continue the numbered list: increment the number
+                        if let current = Int(numberPrefix) {
+                            let next = current + 1
+                            tv.insertText("\(next). ", replacementRange: tv.selectedRange())
+                        }
+                    }
+                }
             }
         }
     }
@@ -476,6 +596,52 @@ enum FormatCommand: Equatable {
     }
 }
 
+// MARK: - NSWindow resize observer (macOS-native width tracking)
+// Wraps an invisible NSView that subscribes to its window's resize notifications.
+// This is the correct pattern on macOS — no GeometryReader polling loops.
+
+private struct WindowWidthReader: NSViewRepresentable {
+    var onResize: (CGFloat) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let v = ResizeObserverView()
+        v.onResize = onResize
+        return v
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? ResizeObserverView)?.onResize = onResize
+    }
+
+    // Private NSView subclass — hooks into windowDidResize the moment it joins a window
+    private class ResizeObserverView: NSView {
+        var onResize: ((CGFloat) -> Void)?
+        private var token: NSObjectProtocol?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            token.map { NotificationCenter.default.removeObserver($0) }
+            token = nil
+            guard let win = window else { return }
+            // Fire once immediately with the current width
+            onResize?(win.frame.width)
+            // Then fire on every resize
+            token = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResizeNotification,
+                object: win,
+                queue: .main
+            ) { [weak self, weak win] _ in
+                guard let w = win?.frame.width else { return }
+                self?.onResize?(w)
+            }
+        }
+
+        deinit {
+            token.map { NotificationCenter.default.removeObserver($0) }
+        }
+    }
+}
+
 // MARK: - Content View
 
 struct ContentView: View {
@@ -484,17 +650,84 @@ struct ContentView: View {
     @State private var currentNoteId: String?
     @State private var selectedTag: String?
     @State private var showStarred = false
-    @State private var showTrash = false
-    @State private var middlePanelOpen = true
+    @State private var showTrash  = false
+
+    // ── Panel state ──────────────────────────────────────────────────────────
+    // windowWidth is written by WindowWidthReader (NSWindow notifications).
+    // middlePanelUserOpen is the explicit user toggle from the toolbar button.
+    @State private var windowWidth: CGFloat = 1200
+    @State private var sidebarUserOpen: Bool = true
+    @State private var middlePanelUserOpen: Bool = true
+
+    // ── Breakpoints (matching the web app) ───────────────────────────────────
+    // sidebarBreakpoint: when the LEFT sidebar appears / disappears
+    // middleBreakpoint : when the MIDDLE list panel appears / disappears
+    // xlBreakpoint     : when the middle panel widens from 260 → 320
+    private let sidebarBreakpoint: CGFloat = 900
+    private let middleBreakpoint: CGFloat  = 760
+    private let xlBreakpoint: CGFloat      = 1100
+
+    // ── Derived panel state ──────────────────────────────────────────────────
+    // Key rule: panels are ALWAYS in the view hierarchy.
+    // We drive their width to 0 when collapsed and clip overflow.
+    // This lets SwiftUI animate the width transition smoothly — no if/else swaps.
+
+    private var sidebarOpen: Bool {
+        // Sidebar only visible on wider layouts and when user hasn't collapsed it.
+        windowWidth >= sidebarBreakpoint && sidebarUserOpen
+    }
+
+    private var middleOpen: Bool {
+        // Middle panel survives longer than sidebar:
+        // first it replaces the sidebar, then it collapses,
+        // leaving only the main editor.
+        windowWidth >= middleBreakpoint && middlePanelUserOpen
+    }
+
+    private var middleTargetWidth: CGFloat {
+        // Matches web: w-[320px] at xl, w-[260px] at lg
+        windowWidth >= xlBreakpoint ? 320 : 260
+    }
+
+    // Smooth spring — feel matches CSS cubic-bezier(0.32, 0.72, 0, 1) / 700ms
+    private let collapseAnim = Animation.spring(response: 0.45, dampingFraction: 0.78, blendDuration: 0)
+
+    // ── Computed note data ───────────────────────────────────────────────────
+    private var nbId: String? {
+        currentNotebookId ?? store.notebooks.first?.id
+    }
+
+    private func noteList() -> [Note] {
+        store.notesFor(
+            notebookId: showTrash ? nil : nbId,
+            tag: selectedTag,
+            starred: showStarred,
+            trash: showTrash
+        )
+    }
+
+    private func activeNote(from list: [Note]) -> Note? {
+        if let id = currentNoteId, let n = store.notes.first(where: { $0.id == id }) { return n }
+        return list.first.flatMap { n in store.notes.first { $0.id == n.id } }
+    }
+
+    private func notebookLabel() -> String {
+        if showTrash   { return "Trash" }
+        if showStarred { return "Starred" }
+        if let t = selectedTag { return "#\(t)" }
+        return store.notebooks.first(where: { $0.id == nbId })?.name ?? ""
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
 
     var body: some View {
-        let nbId = currentNotebookId ?? store.notebooks.first?.id
-        let noteList = store.notesFor(notebookId: showTrash ? nil : nbId, tag: selectedTag, starred: showStarred, trash: showTrash)
-        let activeNote = currentNoteId.flatMap { id in store.notes.first { $0.id == id } }
-            ?? noteList.first.flatMap { n in store.notes.first { $0.id == n.id } }
+        let list = noteList()
+        let note = activeNote(from: list)
 
         HStack(spacing: 0) {
-            // Left sidebar
+
+            // ── Left Sidebar ─────────────────────────────────────────────────
+            // Always in the hierarchy. Width collapses to 0 below lg, clipped.
             LeftSidebarView(
                 currentNotebookId: currentNotebookId ?? store.notebooks.first?.id,
                 showStarred: $showStarred,
@@ -502,10 +735,10 @@ struct ContentView: View {
                 selectedTag: $selectedTag,
                 onSelect: { id in
                     currentNotebookId = id
-                    currentNoteId = nil
-                    showStarred = false
-                    showTrash = false
-                    selectedTag = nil
+                    currentNoteId     = nil
+                    showStarred       = false
+                    showTrash         = false
+                    selectedTag       = nil
                 },
                 onCreate: { name in
                     store.addNotebook(name: name)
@@ -513,82 +746,124 @@ struct ContentView: View {
                 },
                 onDelete: { id in
                     store.deleteNotebook(id: id)
-                    if currentNotebookId == id { currentNotebookId = store.notebooks.first?.id }
+                    if currentNotebookId == id {
+                        currentNotebookId = store.notebooks.first?.id
+                    }
                     currentNoteId = nil
+                },
+                onToggleSidebar: {
+                    // Only allow manual toggle when window is wide enough for sidebar
+                    guard windowWidth >= sidebarBreakpoint else { return }
+                    withAnimation(collapseAnim) {
+                        sidebarUserOpen.toggle()
+                    }
                 }
             )
-            .frame(width: 200)
+            // Fixed 200 pt when open, 0 pt when collapsed — animates smoothly
+            .frame(width: sidebarOpen ? 220 : 0)
+            .clipped()           // hide overflow as width shrinks
 
-            Divider().background(Color.inkBorder)
+            // Divider only occupies space when sidebar is open
+            Rectangle()
+                .fill(Color.inkBorder)
+                .frame(width: sidebarOpen ? 0.5 : 0)
 
-            // Middle panel
-            if middlePanelOpen {
-                MiddlePanelView(
-                    notes: noteList,
-                    currentNoteId: activeNote?.id,
-                    notebookName: notebookLabel(nbId: nbId),
-                    showTrash: showTrash,
-                    canCreate: !showTrash && !showStarred && selectedTag == nil && nbId != nil,
-                    onSelect: { currentNoteId = $0 },
-                    onCreate: {
-                        guard let nb = currentNotebookId ?? store.notebooks.first?.id else { return }
-                        let id = store.addNote(notebookId: nb)
-                        currentNoteId = id
-                    },
-                    onDelete: { id in
-                        store.softDelete(id: id)
-                        if currentNoteId == id { currentNoteId = noteList.first(where: { $0.id != id })?.id }
-                    },
-                    onRestore: { store.restore(id: $0) },
-                    onPermanentDelete: { id in
-                        store.permanentDelete(id: id)
-                        if currentNoteId == id { currentNoteId = nil }
+            // ── Middle Panel ─────────────────────────────────────────────────
+            // Always in hierarchy. Collapses to 0 when: window too narrow OR
+            // user pressed the toggle button. Width grows at xl breakpoint.
+            MiddlePanelView(
+                notes: list,
+                currentNoteId: note?.id,
+                notebookName: notebookLabel(),
+                showTrash: showTrash,
+                canCreate: !showTrash && !showStarred && selectedTag == nil && nbId != nil,
+                onSelect: { currentNoteId = $0 },
+                onCreate: {
+                    guard let nb = currentNotebookId ?? store.notebooks.first?.id else { return }
+                    let id = store.addNote(notebookId: nb)
+                    currentNoteId = id
+                },
+                onDelete: { id in
+                    store.softDelete(id: id)
+                    if currentNoteId == id {
+                        currentNoteId = list.first(where: { $0.id != id })?.id
                     }
-                )
-                .frame(width: 260)
-                .transition(.move(edge: .leading))
-            }
-
-            Divider().background(Color.inkBorder)
-
-            // Editor
-            if let note = activeNote {
-                EditorView(
-                    note: note,
-                    middlePanelOpen: middlePanelOpen,
-                    onToggle: { withAnimation(.easeInOut(duration: 0.25)) { middlePanelOpen.toggle() } },
-                    onSave: { title, content, rtf in
-                        store.updateNote(id: note.id, title: title, content: content, rtfData: rtf)
-                    },
-                    onStar: { store.updateNote(id: note.id, starred: $0) },
-                    onTags: { store.updateNote(id: note.id, tags: $0) },
-                    onReminder: { store.updateNote(id: note.id, reminderAt: $0) }
-                )
-            } else {
-                VStack {
-                    Image(systemName: "square.and.pencil")
-                        .font(.system(size: 40))
-                        .foregroundStyle(Color.inkZinc700)
-                    Text("Select a note to view")
-                        .font(.system(size: 16))
-                        .foregroundStyle(Color.inkZinc500)
+                },
+                onRestore: { store.restore(id: $0) },
+                onPermanentDelete: { id in
+                    store.permanentDelete(id: id)
+                    if currentNoteId == id { currentNoteId = nil }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.inkBlack)
+            )
+            // Width slides between 0 ↔ target smoothly
+            .frame(width: middleOpen ? middleTargetWidth : 0)
+            .clipped()
+
+            Rectangle()
+                .fill(Color.inkBorder)
+                .frame(width: middleOpen ? 0.5 : 0)
+
+            // ── Editor — always visible, takes all remaining space ────────────
+            Group {
+                if let n = note {
+                    EditorView(
+                        note: n,
+                        middlePanelOpen: middleOpen,
+                        onToggle: {
+                            // Only allow manual toggle when window is wide enough
+                            guard windowWidth >= middleBreakpoint else { return }
+                            withAnimation(collapseAnim) {
+                                middlePanelUserOpen.toggle()
+                            }
+                        },
+                        onToggleSidebar: {
+                            // Allow bringing sidebar back regardless of current state,
+                            // but only when window is wide enough for it.
+                            guard windowWidth >= sidebarBreakpoint else { return }
+                            withAnimation(collapseAnim) {
+                                sidebarUserOpen.toggle()
+                            }
+                        },
+                        onSave: { title, content, rtf in
+                            store.updateNote(id: n.id, title: title, content: content, rtfData: rtf)
+                        },
+                        onStar:     { store.updateNote(id: n.id, starred: $0) },
+                        onTags:     { store.updateNote(id: n.id, tags: $0) },
+                        onReminder: { store.updateNote(id: n.id, reminderAt: $0) }
+                    )
+                    .id(n.id)
+                } else {
+                    VStack(spacing: 10) {
+                        Image(systemName: "square.and.pencil")
+                            .font(.system(size: 38))
+                            .foregroundStyle(Color.inkZinc700)
+                        Text("Select a note")
+                            .font(.system(size: 15))
+                            .foregroundStyle(Color.inkZinc500)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.inkBlack)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Color.inkBlack)
         .preferredColorScheme(.dark)
+        // ── WindowWidthReader: invisible NSView that tracks NSWindow resize ──
+        // Placed in a zero-size background so it never affects layout.
+        .background(
+            WindowWidthReader { newWidth in
+                // Directly bind window width to NSWindow frame;
+                // resizing itself is already a smooth, continuous gesture.
+                windowWidth = newWidth
+            }
+            .frame(width: 0, height: 0)   // takes no space
+        )
         .onAppear {
-            if currentNotebookId == nil { currentNotebookId = store.notebooks.first?.id }
+            if currentNotebookId == nil {
+                currentNotebookId = store.notebooks.first?.id
+            }
         }
-    }
-
-    private func notebookLabel(nbId: String?) -> String {
-        if showTrash   { return "Trash" }
-        if showStarred { return "Starred" }
-        if let t = selectedTag { return "#\(t)" }
-        return store.notebooks.first(where: { $0.id == nbId })?.name ?? ""
     }
 }
 
@@ -603,6 +878,7 @@ struct LeftSidebarView: View {
     let onSelect: (String) -> Void
     let onCreate: (String) -> Void
     let onDelete: (String) -> Void
+    let onToggleSidebar: () -> Void
 
     @State private var activeTab = 0
     @State private var search = ""
@@ -620,34 +896,33 @@ struct LeftSidebarView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Logo
+            // Logo + collapse button
             HStack(spacing: 8) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 7)
-                        .fill(Color.inkRed900)
-                        .frame(width: 28, height: 28)
-                    Text("I+")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white)
-                        .kerning(-0.5)
-                }
                 HStack(spacing: 0) {
                     Text("Inked")
-                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        .font(.system(size: 15, weight: .medium, design: .monospaced))
                         .foregroundStyle(Color.inkZinc100)
                     Text("+")
-                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        .font(.system(size: 15, weight: .medium, design: .monospaced))
                         .foregroundStyle(Color.inkRed900)
                 }
+                Spacer()
+                Button(action: onToggleSidebar) {
+                    Image(systemName: "sidebar.leading")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Color.inkZinc500)
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .frame(minHeight: 52)
+            .frame(minHeight: 54)
             sidebarDivider()
 
-            // Quick filters
-            HStack(spacing: 4) {
+            // Quick filters, grouped
+            HStack(spacing: 8) {
                 filterButton("★ Starred", isActive: showStarred, activeColor: .inkAmber, activeBg: Color.inkAmber.opacity(0.15)) {
                     showStarred.toggle(); showTrash = false; if showStarred { selectedTag = nil }
                 }
@@ -655,7 +930,12 @@ struct LeftSidebarView: View {
                     showTrash.toggle(); showStarred = false; if showTrash { selectedTag = nil }
                 }
             }
-            .padding(.horizontal, 8).padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.inkZinc900.opacity(0.6))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             sidebarDivider()
 
             // Tabs
@@ -730,18 +1010,19 @@ struct LeftSidebarView: View {
                     .foregroundStyle(Color.inkZinc500)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.inkZinc800, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+                    .background(Color.inkZinc900.opacity(0.6))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.inkZinc800, lineWidth: 1)
+                    )
                 }
                 .buttonStyle(.plain)
                 .padding(.horizontal, 8).padding(.vertical, 8)
             }
         }
         .background(Color.inkBlack)
-        .alert("New Notebook", isPresented: $showNewNB) {
-            TextField("Notebook name", text: $newNBName)
-            Button("Cancel", role: .cancel) { newNBName = "" }
-            Button("Create") { let n = newNBName.trimmingCharacters(in: .whitespaces); if !n.isEmpty { onCreate(n) }; newNBName = "" }
-        }
+        .sheet(isPresented: $showNewNB) { newNotebookSheet }
         .alert("Delete Notebook", isPresented: .init(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } })) {
             Button("Cancel", role: .cancel) { deleteTarget = nil }
             Button("Delete", role: .destructive) { if let nb = deleteTarget { onDelete(nb.id) }; deleteTarget = nil }
@@ -800,7 +1081,8 @@ struct LeftSidebarView: View {
                 Text(label).font(.system(size: 10, weight: .medium))
             }
             .foregroundStyle(isActive ? activeColor : Color.inkZinc500)
-            .padding(.horizontal, 8).padding(.vertical, 5)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
             .background(isActive ? activeBg : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 7))
         }
@@ -827,6 +1109,79 @@ struct LeftSidebarView: View {
     private func sidebarDivider() -> some View {
         Divider().background(Color.inkZinc800).opacity(0.5)
     }
+
+    private var newNotebookSheet: some View {
+        ZStack {
+            Color.inkBlack
+            VStack(spacing: 18) {
+                // Header
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("New notebook")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.inkZinc100)
+                        Text("Create a fresh space for a set of notes.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.inkZinc500)
+                    }
+                    Spacer()
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("NAME")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.inkZinc600)
+                        .tracking(1.2)
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "folder")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.inkZinc500)
+                        TextField("Notebook name", text: $newNBName)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.inkZinc100)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(Color.inkZinc900)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.inkZinc800, lineWidth: 1)
+                    )
+                }
+
+                Spacer(minLength: 0)
+
+                HStack {
+                    Button("Cancel") {
+                        newNBName = ""
+                        showNewNB = false
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    .foregroundStyle(Color.inkZinc300)
+
+                    Spacer()
+
+                    Button("Create") {
+                        let name = newNBName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !name.isEmpty {
+                            onCreate(name)
+                        }
+                        newNBName = ""
+                        showNewNB = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(newNBName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .font(.system(size: 12, weight: .medium))
+            }
+            .padding(20)
+        }
+        .frame(width: 380, height: 210)
+    }
 }
 
 // MARK: - Middle Panel
@@ -847,6 +1202,7 @@ struct MiddlePanelView: View {
     @State private var search = ""
     @State private var deleteTarget: Note?
     @State private var isPermanent = false
+    @State private var showDeleteSheet = false
 
     private var filtered: [Note] {
         guard !search.isEmpty else { return notes }
@@ -906,16 +1262,31 @@ struct MiddlePanelView: View {
             .padding(.horizontal, 12).padding(.vertical, 7)
             Divider().background(Color.inkZinc800).opacity(0.5)
 
-            // Note list
+            // Note list / empty states
             if filtered.isEmpty {
-                VStack(spacing: 8) {
-                    Text(search.isEmpty ? (showTrash ? "Trash is empty" : "No notes yet") : "No results")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Color.inkZinc500)
-                    if search.isEmpty && !showTrash && canCreate {
-                        Button("Create note", action: onCreate)
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
+                VStack(spacing: 10) {
+                    if !search.isEmpty {
+                        Text("No results")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.inkZinc500)
+                    } else if showTrash {
+                        VStack(spacing: 8) {
+                            Image(systemName: "trash")
+                                .font(.system(size: 22))
+                                .foregroundStyle(Color.inkZinc700)
+                            Text("Trash is empty")
+                                .font(.system(size: 13))
+                                .foregroundStyle(Color.inkZinc500)
+                        }
+                    } else {
+                        VStack(spacing: 10) {
+                            Image(systemName: "square.and.pencil")
+                                .font(.system(size: 38))
+                                .foregroundStyle(Color.inkZinc700)
+                            Text("No notes yet")
+                                .font(.system(size: 15))
+                                .foregroundStyle(Color.inkZinc500)
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -929,7 +1300,11 @@ struct MiddlePanelView: View {
                                 isSelected: currentNoteId == note.id,
                                 showTrash: showTrash,
                                 onSelect: { onSelect(note.id) },
-                                onDelete: { deleteTarget = note; isPermanent = showTrash },
+                                onDelete: {
+                                    deleteTarget = note
+                                    isPermanent = showTrash
+                                    showDeleteSheet = true
+                                },
                                 onRestore: { onRestore(note.id) }
                             )
                             Divider().background(Color.inkZinc800).opacity(0.3).padding(.leading, 14)
@@ -940,18 +1315,82 @@ struct MiddlePanelView: View {
             }
         }
         .background(Color.inkBlack)
-        .alert(isPermanent ? "Delete Permanently" : "Delete Note",
-               isPresented: .init(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } })) {
-            Button("Cancel", role: .cancel) { deleteTarget = nil }
-            Button(isPermanent ? "Delete Forever" : "Move to Trash", role: .destructive) {
-                if let n = deleteTarget { isPermanent ? onPermanentDelete(n.id) : onDelete(n.id) }
-                deleteTarget = nil
+        .sheet(isPresented: $showDeleteSheet) { deleteSheet }
+    }
+}
+
+private extension MiddlePanelView {
+    var deleteSheet: some View {
+        ZStack {
+            Color.inkBlack
+            VStack(spacing: 18) {
+                // Header
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(isPermanent ? "Delete permanently" : "Move to Trash")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.inkZinc100)
+                        if let n = deleteTarget {
+                            Text(isPermanent
+                                 ? "This will permanently delete \"\(n.title.isEmpty ? "Untitled" : n.title)\"."
+                                 : "This will move \"\(n.title.isEmpty ? "Untitled" : n.title)\" to Trash.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.inkZinc500)
+                        }
+                    }
+                    Spacer()
+                }
+
+                // Icon + warning
+                HStack(spacing: 10) {
+                    Image(systemName: isPermanent ? "trash.slash" : "trash")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Color.inkRed900)
+                        .frame(width: 32, height: 32)
+                        .background(Color.inkRed900.opacity(0.15))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(isPermanent ? "This cannot be undone." : "You can restore this later from Trash.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.inkZinc500)
+                    }
+                    Spacer()
+                }
+
+                Spacer(minLength: 0)
+
+                // Actions
+                HStack {
+                    Button("Cancel") {
+                        deleteTarget = nil
+                        showDeleteSheet = false
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    .foregroundStyle(Color.inkZinc300)
+
+                    Spacer()
+
+                    Button(isPermanent ? "Delete forever" : "Move to Trash") {
+                        if let n = deleteTarget {
+                            if isPermanent {
+                                onPermanentDelete(n.id)
+                            } else {
+                                onDelete(n.id)
+                            }
+                        }
+                        deleteTarget = nil
+                        showDeleteSheet = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                }
+                .font(.system(size: 12, weight: .medium))
             }
-        } message: {
-            if let n = deleteTarget {
-                Text(isPermanent ? "Permanently delete \"\(n.title)\"? This cannot be undone." : "Move \"\(n.title)\" to Trash?")
-            }
+            .padding(20)
         }
+        .frame(width: 380, height: 220)
     }
 }
 
@@ -962,6 +1401,8 @@ struct NoteRow: View {
     let onSelect: () -> Void
     let onDelete: () -> Void
     let onRestore: () -> Void
+
+    @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -988,10 +1429,12 @@ struct NoteRow: View {
                         }.buttonStyle(.plain)
                     }
                     Button(action: onDelete) {
-                        Image(systemName: "trash")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color.inkRed900.opacity(0.8))
-                    }.buttonStyle(.plain)
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Color.inkRed900.opacity(0.9))
+                    }
+                    .buttonStyle(.plain)
+                    .opacity(isHovering ? 1 : 0)
                 }
 
                 Text(note.content.isEmpty ? "No content" : note.content)
@@ -1020,6 +1463,11 @@ struct NoteRow: View {
         .background(isSelected ? Color.inkZinc900 : Color.inkBlack)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
+        .onHover { inside in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                isHovering = inside
+            }
+        }
     }
 
     private func relativeDate(_ d: Date) -> String {
@@ -1033,18 +1481,34 @@ struct NoteRow: View {
     }
 }
 
+// MARK: - Title / body splitter
+// Treats the first line of the plain text as the title (H1),
+// everything after the first newline as the body.
+
+private func splitTitleAndBody(from text: String) -> (String, String) {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let newlineRange = trimmed.range(of: "\n") else {
+        // Single-line note: title only
+        return (trimmed, "")
+    }
+    let title = String(trimmed[..<newlineRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+    let bodyStart = trimmed.index(after: newlineRange.lowerBound)
+    let body = String(trimmed[bodyStart...]).trimmingCharacters(in: .whitespacesAndNewlines)
+    return (title, body)
+}
+
 // MARK: - Editor View
 
 struct EditorView: View {
     let note: Note
     let middlePanelOpen: Bool
     let onToggle: () -> Void
+    let onToggleSidebar: () -> Void
     let onSave: (String, String, Data?) -> Void
     let onStar: (Bool) -> Void
     let onTags: ([String]) -> Void
     let onReminder: (Date?) -> Void
 
-    @State private var titleText: String
     @State private var bodyText: String
     @State private var rtfData: Data?
     @State private var wordCount = 0
@@ -1064,8 +1528,14 @@ struct EditorView: View {
     @State private var linkDraft = ""
     @State private var showMore = false
     @StateObject private var voice = VoiceRecognizer()
+    @State private var selectedFontName: String = "Poppins"
+    @State private var showSettingsSheet = false
+    @State private var micAutoEnabled: Bool = UserDefaults.standard.bool(forKey: "inkedAutoMic")
 
-    init(note: Note, middlePanelOpen: Bool, onToggle: @escaping () -> Void,
+    init(note: Note,
+         middlePanelOpen: Bool,
+         onToggle: @escaping () -> Void,
+         onToggleSidebar: @escaping () -> Void,
          onSave: @escaping (String, String, Data?) -> Void,
          onStar: @escaping (Bool) -> Void,
          onTags: @escaping ([String]) -> Void,
@@ -1073,12 +1543,13 @@ struct EditorView: View {
         self.note = note
         self.middlePanelOpen = middlePanelOpen
         self.onToggle = onToggle
+        self.onToggleSidebar = onToggleSidebar
         self.onSave = onSave
         self.onStar = onStar
         self.onTags = onTags
         self.onReminder = onReminder
-        _titleText = State(initialValue: note.title)
-        _bodyText = State(initialValue: note.content)
+        let combined = [note.title, note.content].joined(separator: note.content.isEmpty ? "" : "\n")
+        _bodyText = State(initialValue: combined)
         _rtfData = State(initialValue: note.rtfData)
         _tagDraft = State(initialValue: note.tags.joined(separator: ", "))
         _reminderDraft = State(initialValue: note.reminderAt ?? Date().addingTimeInterval(3600))
@@ -1092,8 +1563,8 @@ struct EditorView: View {
         }
         .background(Color.inkBlack)
         .onAppear {
-            titleText = note.title
-            bodyText = note.content
+            let combined = [note.title, note.content].joined(separator: note.content.isEmpty ? "" : "\n")
+            bodyText = combined
             rtfData = note.rtfData
             tagDraft = note.tags.joined(separator: ", ")
             reminderDraft = note.reminderAt ?? Date().addingTimeInterval(3600)
@@ -1104,29 +1575,57 @@ struct EditorView: View {
         }
         .onChange(of: note.id) { _ in
             voice.stop()
-            titleText = note.title
-            bodyText = note.content
+            let combined = [note.title, note.content].joined(separator: note.content.isEmpty ? "" : "\n")
+            bodyText = combined
             rtfData = note.rtfData
             tagDraft = note.tags.joined(separator: ", ")
         }
         .sheet(isPresented: $showTagSheet) { tagSheet }
         .sheet(isPresented: $showReminderSheet) { reminderSheet }
         .sheet(isPresented: $showLinkSheet) { linkSheet }
+        .sheet(isPresented: $showSettingsSheet) { settingsSheet }
     }
 
     // MARK: Top Toolbar
 
     private var topToolbar: some View {
         HStack(spacing: 8) {
-            // Left group 1: panel toggle, star
+            // Left group 1: sidebar toggle, middle panel toggle, star
             toolbarPill {
+                toolBtn(systemImage: "sidebar.leading") { onToggleSidebar() }
                 toolBtn(systemImage: middlePanelOpen ? "sidebar.left" : "sidebar.right") { onToggle() }
                 toolBtn(systemImage: note.starred ? "star.fill" : "star",
                         color: note.starred ? .inkAmber : .inkZinc400) { onStar(!note.starred) }
             }
 
-            // Left group 2: tag, type
+            // Left group 2: font, tag, type
             toolbarPill {
+                // Font selector
+                Menu {
+                    ForEach(["Poppins", "SF Pro", "Menlo", "Georgia", "Helvetica Neue"], id: \.self) { name in
+                        Button {
+                            selectedFontName = name
+                        } label: {
+                            HStack {
+                                Text(name)
+                                if selectedFontName == name {
+                                    Spacer()
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(selectedFontName)
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(Color.inkZinc300)
+                    .padding(.horizontal, 8)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+
                 toolBtn(systemImage: "number", color: Color.inkRed900) { showTagSheet = true }
                 toolBtn(systemImage: "textformat") { fire(.paragraph) }
             }
@@ -1142,7 +1641,7 @@ struct EditorView: View {
 
             Spacer()
 
-            // Record pill button
+            // Record pill button (fixed, consistent height)
             Button {
                 voice.toggle()
             } label: {
@@ -1152,30 +1651,41 @@ struct EditorView: View {
                         .frame(width: 7, height: 7)
                         .opacity(voice.isRecording ? 1 : 1)
                         .scaleEffect(voice.isRecording ? 1.0 : 0.85)
-                        .animation(voice.isRecording ? .easeInOut(duration: 0.7).repeatForever(autoreverses: true) : .default, value: voice.isRecording)
+                        .animation(
+                            voice.isRecording
+                            ? .easeInOut(duration: 0.7).repeatForever(autoreverses: true)
+                            : .default,
+                            value: voice.isRecording
+                        )
                     Text("Record")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.white)
+                        .lineLimit(1)
                 }
-                .padding(.horizontal, 16).padding(.vertical, 7)
+                .padding(.horizontal, 14)
+                .frame(height: 28)
                 .background(voice.isRecording ? Color.inkRed800 : Color.inkRed900)
                 .clipShape(Capsule())
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
 
-            // Right group: bell, share, more
+            // Right group: bell, share, more, settings
             toolbarPill {
                 toolBtn(systemImage: note.reminderAt != nil ? "bell.fill" : "bell",
                         color: note.reminderAt != nil ? .inkAmber : .inkZinc400) { showReminderSheet = true }
                 toolBtn(systemImage: "square.and.arrow.up") {
-                    let text = titleText + "\n\n" + bodyText
+                    let (title, body) = splitTitleAndBody(from: bodyText)
+                    let text = title.isEmpty ? body : "\(title)\n\n\(body)"
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(text, forType: .string)
                 }
                 Menu {
                     Button("Copy note") {
                         NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(titleText + "\n\n" + bodyText, forType: .string)
+                        let (title, body) = splitTitleAndBody(from: bodyText)
+                        let text = title.isEmpty ? body : "\(title)\n\n\(body)"
+                        NSPasteboard.general.setString(text, forType: .string)
                     }
                     Divider()
                     Button("Export as .txt") { exportTxt() }
@@ -1189,6 +1699,10 @@ struct EditorView: View {
                 .buttonStyle(.plain)
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+
+                toolBtn(systemImage: "gearshape") {
+                    showSettingsSheet = true
+                }
             }
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
@@ -1201,45 +1715,19 @@ struct EditorView: View {
     private var editorBody: some View {
         ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
-                // Title field
-                TextField("Start title here...", text: $titleText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 28, weight: .semibold))
-                    .foregroundStyle(Color.inkZinc100)
-                    .padding(.horizontal, 32)
-                    .padding(.top, 20)
-                    .padding(.bottom, 12)
-                    .onChange(of: titleText) { _ in scheduleSave() }
-
-                Divider().background(Color.inkZinc800).opacity(0.2).padding(.horizontal, 32)
-
-                // Interim voice text
-                if !voice.interimText.isEmpty {
-                    HStack {
-                        Image(systemName: "mic.fill")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color.red.opacity(0.7))
-                        Text(voice.interimText)
-                            .font(.system(size: 12, weight: .light))
-                            .foregroundStyle(Color.inkZinc400)
-                            .italic()
-                    }
-                    .padding(.horizontal, 32)
-                    .padding(.top, 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .transition(.opacity)
-                }
-
-                // Rich text body
+                // Single rich text area – first line acts as H1
                 ZStack(alignment: .topTrailing) {
                     RichTextEditor(
                         rtfData: $rtfData,
                         plainText: $bodyText,
                         onWordCount: { w, c in wordCount = w; charCount = c },
                         formatCommand: formatCmd,
-                        insertText: insertVoice
+                        insertText: insertVoice,
+                        fontName: selectedFontName,
+                        formatVersion: formatTick
                     )
                     .padding(.horizontal, 24)
+                    .padding(.top, 16)
                     .onChange(of: bodyText) { _ in scheduleSave() }
                     .onChange(of: rtfData) { _ in scheduleSave() }
 
@@ -1254,17 +1742,12 @@ struct EditorView: View {
                             Text("\(charCount)").font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(.white)
                             Text("characters").font(.system(size: 10)).foregroundStyle(Color.inkZinc500)
                         }
-                        if isSaving || showSaved {
-                            Circle()
-                                .fill(Color.red.opacity(showSaved ? 0.45 : 0.85))
-                                .frame(width: 5, height: 5)
-                        }
                     }
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .background(Color.inkZinc900.opacity(0.6))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.inkZinc800.opacity(0.3), lineWidth: 0.5))
-                    .padding(.top, 8)
+                    .padding(.top, 4)
                     .padding(.trailing, 32)
                 }
             }
@@ -1316,39 +1799,147 @@ struct EditorView: View {
     // MARK: Sheets
 
     private var tagSheet: some View {
-        VStack(spacing: 20) {
-            Text("Edit Tags").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
-            TextField("Tags (comma-separated)", text: $tagDraft)
-                .textFieldStyle(.roundedBorder)
-            HStack {
-                Button("Cancel") { showTagSheet = false }.buttonStyle(.bordered)
-                Spacer()
-                Button("Save") {
-                    let tags = tagDraft.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-                    onTags(tags)
-                    showTagSheet = false
-                }.buttonStyle(.borderedProminent)
+        ZStack {
+            Color.inkBlack
+            VStack(spacing: 18) {
+                // Header
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Edit tags")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.inkZinc100)
+                        Text("Separate multiple tags with commas.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.inkZinc500)
+                    }
+                    Spacer()
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("TAGS")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.inkZinc600)
+                        .tracking(1.2)
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "number")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.inkRed900)
+                        TextField("work, personal, ideas", text: $tagDraft)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.inkZinc100)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(Color.inkZinc900)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.inkZinc800, lineWidth: 1)
+                    )
+                }
+
+                Spacer(minLength: 0)
+
+                HStack {
+                    Button("Cancel") {
+                        showTagSheet = false
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    .foregroundStyle(Color.inkZinc300)
+
+                    Spacer()
+
+                    Button("Save") {
+                        let tags = tagDraft
+                            .split(separator: ",")
+                            .map { $0.trimmingCharacters(in: .whitespaces) }
+                            .filter { !$0.isEmpty }
+                        onTags(tags)
+                        showTagSheet = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                }
+                .font(.system(size: 12, weight: .medium))
             }
+            .padding(20)
         }
-        .padding(24)
-        .frame(width: 380)
+        .frame(width: 380, height: 210)
     }
 
     private var reminderSheet: some View {
-        VStack(spacing: 20) {
-            Text("Set Reminder").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
-            DatePicker("Date & Time", selection: $reminderDraft)
-            if note.reminderAt != nil {
-                Button("Clear Reminder", role: .destructive) { onReminder(nil); showReminderSheet = false }
+        ZStack {
+            Color.inkBlack
+            VStack(spacing: 18) {
+                // Header
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Set reminder")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.inkZinc100)
+                        Text("Pick a time to be nudged about this note.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.inkZinc500)
+                    }
+                    Spacer()
+                }
+
+                // Date & time
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("REMINDER")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.inkZinc600)
+                        .tracking(1.2)
+
+                    DatePicker("Date & Time", selection: $reminderDraft)
+                        .labelsHidden()
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(Color.inkZinc900)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(Color.inkZinc800, lineWidth: 1)
+                        )
+
+                    if note.reminderAt != nil {
+                        Button("Clear existing reminder", role: .destructive) {
+                            onReminder(nil)
+                            showReminderSheet = false
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.inkRed900)
+                        .font(.system(size: 11, weight: .medium))
+                        .padding(.top, 4)
+                    }
+                }
+
+                Spacer(minLength: 0)
+
+                // Actions
+                HStack {
+                    Button("Cancel") {
+                        showReminderSheet = false
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    .foregroundStyle(Color.inkZinc300)
+
+                    Spacer()
+
+                    Button("Set reminder") {
+                        onReminder(reminderDraft)
+                        showReminderSheet = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                }
+                .font(.system(size: 12, weight: .medium))
             }
-            HStack {
-                Button("Cancel") { showReminderSheet = false }.buttonStyle(.bordered)
-                Spacer()
-                Button("Set") { onReminder(reminderDraft); showReminderSheet = false }.buttonStyle(.borderedProminent)
-            }
+            .padding(20)
         }
-        .padding(24)
-        .frame(width: 380)
+        .frame(width: 380, height: 220)
     }
 
     private var linkSheet: some View {
@@ -1387,7 +1978,8 @@ struct EditorView: View {
             try? await Task.sleep(nanoseconds: 600_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                onSave(titleText, bodyText, rtfData)
+                let (title, body) = splitTitleAndBody(from: bodyText)
+                onSave(title, body, rtfData)
                 isSaving = false
                 showSaved = true
                 Task { @MainActor in
@@ -1401,18 +1993,97 @@ struct EditorView: View {
     private func exportTxt() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.plainText]
-        panel.nameFieldStringValue = (titleText.isEmpty ? "note" : titleText) + ".txt"
+        let (title, body) = splitTitleAndBody(from: bodyText)
+        panel.nameFieldStringValue = (title.isEmpty ? "note" : title) + ".txt"
         if panel.runModal() == .OK, let url = panel.url {
-            try? (titleText + "\n\n" + bodyText).write(to: url, atomically: true, encoding: .utf8)
+            let text = title.isEmpty ? body : "\(title)\n\n\(body)"
+            try? text.write(to: url, atomically: true, encoding: String.Encoding.utf8)
         }
     }
 
     private func exportMD() {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = (titleText.isEmpty ? "note" : titleText) + ".md"
+        let (title, body) = splitTitleAndBody(from: bodyText)
+        panel.nameFieldStringValue = (title.isEmpty ? "note" : title) + ".md"
         if panel.runModal() == .OK, let url = panel.url {
-            let md = "# \(titleText)\n\n\(bodyText)"
-            try? md.write(to: url, atomically: true, encoding: .utf8)
+            let header = title.isEmpty ? "Untitled" : title
+            let md = "# \(header)\n\n\(body)"
+            try? md.write(to: url, atomically: true, encoding: String.Encoding.utf8)
+        }
+    }
+
+    private var settingsSheet: some View {
+        ZStack {
+            Color.inkBlack
+            VStack(spacing: 18) {
+                // Header
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Inked+ settings")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.inkZinc100)
+                        Text("Control microphone behavior for voice notes.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.inkZinc500)
+                    }
+                    Spacer()
+                }
+
+                // Mic auto access
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("MICROPHONE")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.inkZinc600)
+                        .tracking(1.2)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Allow automatic mic access")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Color.inkZinc100)
+                            Text("If enabled, Inked+ will try to pre‑authorize mic access so you aren’t prompted every time you hit Record.")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.inkZinc500)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $micAutoEnabled)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                            .tint(.green)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 10)
+                    .background(Color.inkZinc900)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.inkZinc800, lineWidth: 1)
+                    )
+                }
+
+                Spacer(minLength: 0)
+
+                // Footer
+                HStack {
+                    Button("Close") {
+                        showSettingsSheet = false
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    .foregroundStyle(Color.inkZinc300)
+
+                    Spacer()
+                }
+                .font(.system(size: 12, weight: .medium))
+            }
+            .padding(20)
+        }
+        .frame(width: 420, height: 220)
+        .onChange(of: micAutoEnabled) { value in
+            UserDefaults.standard.set(value, forKey: "inkedAutoMic")
+        }
+        .onAppear {
+            micAutoEnabled = UserDefaults.standard.bool(forKey: "inkedAutoMic")
         }
     }
 
@@ -1481,9 +2152,4 @@ struct FmtButtonStyle: ButtonStyle {
             .background(configuration.isPressed ? Color.inkZinc700.opacity(0.5) : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 5))
     }
-}
-
-#Preview {
-    ContentView()
-        .environmentObject(AppStore())
 }
