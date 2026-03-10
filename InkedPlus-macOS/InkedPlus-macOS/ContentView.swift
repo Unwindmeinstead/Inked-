@@ -316,9 +316,9 @@ struct RichTextEditor: NSViewRepresentable {
 
         switch cmd {
         case .bold:
-            toggleTrait(.bold, in: storage, range: range, tv: tv)
+            toggleTrait(.boldTrait, in: storage, range: range, tv: tv)
         case .italic:
-            toggleTrait(.italic, in: storage, range: range, tv: tv)
+            toggleTrait(.italicTrait, in: storage, range: range, tv: tv)
         case .underline:
             toggleAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, in: storage, range: range)
         case .strikethrough:
