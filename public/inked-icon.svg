@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <rect width="128" height="128" rx="26" fill="#18181b"/>
+  <text x="64" y="78" text-anchor="middle" font-family="system-ui, -apple-system, BlinkMacSystemFont, sans-serif" font-weight="600" font-size="42" fill="#fafafa" letter-spacing="-0.02em">Inked</text>
+  <text x="64" y="105" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-weight="600" font-size="22" fill="#fafafa">+</text>
+  <path d="M60 92v8c0 2.5 1.5 4 3 4s3-1.5 3-4V92" stroke="#ef4444" stroke-width="1.8" stroke-linecap="round" fill="none" opacity="0.9"/>
+</svg>
